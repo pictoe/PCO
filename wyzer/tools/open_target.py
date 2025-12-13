@@ -112,6 +112,104 @@ class OpenTargetTool(ToolBase):
                     "latency_ms": latency_ms
                 }
             
+            elif target_type == "game":
+                # Launch game based on launch type
+                launch_info = resolved.get("launch", {})
+                launch_type = launch_info.get("type", "")
+                launch_target = launch_info.get("target", "")
+                
+                try:
+                    if launch_type == "steam_uri":
+                        # Open Steam URI
+                        import webbrowser
+                        webbrowser.open(launch_target)
+                    
+                    elif launch_type == "epic_uri":
+                        # Open Epic Games launcher URI
+                        import webbrowser
+                        webbrowser.open(launch_target)
+                    
+                    elif launch_type == "exe":
+                        # Launch executable directly
+                        subprocess.Popen([launch_target], shell=False)
+                    
+                    elif launch_type == "shortcut":
+                        # Open .lnk shortcut
+                        os.startfile(launch_target)
+                    
+                    elif launch_type == "uwp":
+                        # Launch UWP app via explorer
+                        subprocess.run(["explorer", launch_target], check=False)
+                    
+                    else:
+                        end_time = time.perf_counter()
+                        latency_ms = int((end_time - start_time) * 1000)
+                        
+                        return {
+                            "error": {
+                                "type": "unsupported_launch_type",
+                                "message": f"Unsupported game launch type: {launch_type}"
+                            },
+                            "resolved": resolved,
+                            "latency_ms": latency_ms
+                        }
+                    
+                    end_time = time.perf_counter()
+                    latency_ms = int((end_time - start_time) * 1000)
+                    
+                    return {
+                        "status": "opened",
+                        "resolved": resolved,
+                        "game_name": resolved.get("game_name", ""),
+                        "latency_ms": latency_ms
+                    }
+                    
+                except Exception as e:
+                    end_time = time.perf_counter()
+                    latency_ms = int((end_time - start_time) * 1000)
+                    
+                    return {
+                        "error": {
+                            "type": "launch_error",
+                            "message": f"Failed to launch game: {str(e)}"
+                        },
+                        "resolved": resolved,
+                        "latency_ms": latency_ms
+                    }
+            
+            elif target_type == "uwp":
+                # Launch UWP app via explorer shell:AppsFolder
+                app_id = resolved.get("path", "")
+                
+                try:
+                    subprocess.Popen(
+                        ["explorer.exe", f"shell:AppsFolder\\{app_id}"],
+                        shell=False
+                    )
+                    
+                    end_time = time.perf_counter()
+                    latency_ms = int((end_time - start_time) * 1000)
+                    
+                    return {
+                        "status": "opened",
+                        "resolved": resolved,
+                        "app_name": resolved.get("app_name", ""),
+                        "latency_ms": latency_ms
+                    }
+                    
+                except Exception as e:
+                    end_time = time.perf_counter()
+                    latency_ms = int((end_time - start_time) * 1000)
+                    
+                    return {
+                        "error": {
+                            "type": "launch_error",
+                            "message": f"Failed to launch UWP app: {str(e)}"
+                        },
+                        "resolved": resolved,
+                        "latency_ms": latency_ms
+                    }
+            
             elif target_type == "folder":
                 # Open folder in Explorer
                 self._open_folder(target_path)
