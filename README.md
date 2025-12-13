@@ -1,41 +1,43 @@
-# Wyzer AI Assistant - Phase 5
+# Wyzer AI Assistant - Phase 6
 
-A voice-controlled AI assistant for Windows 10/11 with hotword detection, speech-to-text, local LLM brain, and Piper TTS. This implementation covers Phase 1-5: project skeleton, audio pipeline with VAD and hotword detection, speech transcription, local LLM integration via Ollama, and local text-to-speech with barge-in support.
+A voice-controlled AI assistant for Windows 10/11 with hotword detection, speech-to-text, local LLM brain (Ollama), local Piper TTS, and a Phase 6 tool-calling orchestrator for safe local actions.
 
 ## Features
 
-- ✅ **Hotword Detection**: Wake the assistant with "hey wyzer" or "wyzer"
+- ✅ **Hotword Detection**: Wake the assistant with the default openWakeWord model ("hey jarvis")
 - ✅ **Voice Activity Detection (VAD)**: Silero VAD with energy-based fallback
 - ✅ **Speech-to-Text**: Fast, accurate transcription using faster-whisper
 - ✅ **Local LLM Brain**: Conversational AI using Ollama (Phase 4)
 - ✅ **Text-to-Speech**: Local, fast Piper TTS (Phase 5)
 - ✅ **Barge-in Support**: Interrupt TTS by saying the hotword (Phase 5)
+- ✅ **Tool Calling (Phase 6)**: LLM can call safe, allowlisted local tools
 - ✅ **State Machine**: Clean state transitions (IDLE → LISTENING → TRANSCRIBING → THINKING → SPEAKING)
-- ✅ **Cross-platform**: Windows-first, but compatible with Linux/macOS
+- ✅ **Cross-platform (core)**: Windows-first; some bundled binaries/tools are Windows-specific
 - ✅ **Robust Audio**: 16kHz mono pipeline with proper buffering
 - ✅ **Spam Filtering**: Automatically filters repetition spam and garbage output
-- ✅ **Privacy-First**: Runs entirely offline on your device
+- ✅ **Privacy-First**: Core voice + LLM run locally; some optional tools (e.g., weather/location) require internet
 
 ## System Requirements
 
 - **OS**: Windows 10/11 (primary), Linux/macOS (compatible)
-- **Python**: 3.10-3.12 recommended (3.13+ has limited hotword support)
+- **Python**: 3.10-3.12 recommended
 - **Microphone**: Working audio input device
 - **RAM**: 4GB+ recommended (2GB for Whisper + 2GB for LLM)
 - **CPU**: Modern CPU with AVX support recommended
 - **Ollama**: Required for Phase 4 LLM features (install separately)
 
-**Note on Python 3.13+**: Hotword detection (openWakeWord) requires `tflite-runtime` which is not available for Python 3.13+. For full hotword functionality, use Python 3.10-3.12. The `--no-hotword` mode works perfectly on all Python versions.
+**Note**: Some audio/ML dependencies may lag newest Python releases. If you hit install issues on 3.13+, try 3.10-3.12.
 
 ## Quick Start
 
 ### 1. Install Dependencies
 
 ```bash
-# Create virtual environment (recommended)
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/macOS
+# Create virtual environment (recommended; matches run.bat)
+python -m venv .venv
+.venv\Scripts\activate.bat  # Windows (CMD)
+# .venv\Scripts\Activate.ps1  # Windows (PowerShell)
+# source .venv/bin/activate  # Linux/macOS
 
 # Install requirements
 pip install -r requirements.txt
@@ -66,43 +68,15 @@ For full conversational AI capabilities:
    ollama pull llama3.1:70b
    ```
 
-### 3. Install Piper TTS (Phase 5)
+### 3. Piper TTS (Phase 5)
 
-For text-to-speech capabilities:
+Piper (Windows) and a default voice model are already included in this repo under `wyzer/assets/piper/`.
 
-1. **Download Piper executable and voice model**:
-   - Visit: https://github.com/rhasspy/piper/releases
-   - Download the appropriate release for your OS (e.g., `piper_windows_amd64.zip`)
-   - Extract the ZIP file
-
-2. **Create assets directory and copy files**:
-   ```bash
-   # Create directory structure
-   mkdir -p assets\piper
-   
-   # Copy Piper executable
-   # Windows: Copy piper.exe to assets/piper/
-   # Linux/macOS: Copy piper binary to assets/piper/
-   ```
-
-3. **Download a voice model**:
-   - Visit: https://github.com/rhasspy/piper/blob/master/VOICES.md
-   - Download a voice model (e.g., `en_US-lessac-medium.onnx`)
-   - Place in `assets/piper/` folder
-   - Example:
-     ```bash
-     # Download en_US-lessac-medium voice
-     # Place both .onnx and .onnx.json files in assets/piper/
-     ```
-
-4. **Test Piper installation**:
-   ```bash
-   # Windows
-   .\assets\piper\piper.exe --version
-   
-   # Test synthesis
-   echo "Hello, this is a test" | .\assets\piper\piper.exe -m .\assets\piper\en_US-lessac-medium.onnx -f test.wav
-   ```
+**Quick test**:
+```bash
+.\wyzer\assets\piper\piper.exe --version
+echo "Hello, this is a test" | .\wyzer\assets\piper\piper.exe -m .\wyzer\assets\piper\en_US-lessac-medium.onnx -f test.wav
+```
 
 **Recommended Voice Models**:
 - **Fast & Good**: `en_US-lessac-medium.onnx` (~63 MB)
@@ -112,11 +86,14 @@ For text-to-speech capabilities:
 ### 4. Run Wyzer
 
 ```bash
+# Windows convenience launcher (uses .venv\Scripts\python.exe)
+run.bat
+
 # Normal mode with hotword detection, LLM, and TTS
 python run.py
 
 # Specify Piper model path
-python run.py --piper-model assets/piper/en_US-lessac-medium.onnx
+python run.py --piper-model .\wyzer\assets\piper\en_US-lessac-medium.onnx
 
 # Test mode (no hotword, immediate listening, with TTS)
 python run.py --no-hotword
@@ -142,7 +119,7 @@ python run.py --ollama-url http://192.168.1.100:11434
 # List available audio devices
 python run.py --list-devices
 
-# Use specific audio device
+# Use specific audio device (index from --list-devices)
 python run.py --device 1
 
 # Disable barge-in (no hotword interrupt during speaking)
@@ -156,7 +133,7 @@ python run.py --no-speak-interrupt
 python run.py
 ```
 1. Wait for "Ready. Listening for hotword..."
-2. Say "hey wyzer" or "wyzer"
+2. Say the wake word (default model: "hey jarvis")
 3. Speak your request after acknowledgment
 4. Assistant transcribes, thinks, and speaks the response
 5. **Barge-in**: Say the hotword while speaking to interrupt immediately
@@ -168,14 +145,7 @@ python run.py --no-hotword
 1. Assistant immediately starts listening
 2. Speak your request
 3. Pauses when you stop speaking (1.2s silence timeout)
-4. Transcribes, thinks, speaks response, and exits
-```bash
-python run.py --no-hotword
-```
-1. Assistant immediately starts listening
-2. Speak your request
-3. Pauses when you stop speaking (1.2s silence timeout)
-4. Transcribes and exits
+4. Transcribes, thinks, speaks response (if enabled), and exits
 
 ### Custom Configuration
 ```bash
@@ -183,7 +153,7 @@ python run.py --no-hotword
 python run.py --model medium
 
 # Custom Piper voice model
-python run.py --piper-model assets/piper/en_US-amy-medium.onnx
+python run.py --piper-model .\path\to\voice.onnx
 
 # Use different TTS output device
 python run.py --tts-device 2
@@ -238,7 +208,7 @@ set WYZER_VAD_SILENCE_TIMEOUT=1.2
 set WYZER_VAD_THRESHOLD=0.5
 
 # Hotword settings
-set WYZER_HOTWORD_KEYWORDS=hey wyzer,wyzer
+set WYZER_HOTWORD_KEYWORDS=hey jarvis,jarvis
 set WYZER_HOTWORD_THRESHOLD=0.5
 
 # Whisper settings
@@ -258,8 +228,8 @@ set WYZER_LLM_TIMEOUT=30
 # TTS settings (Phase 5)
 set WYZER_TTS_ENABLED=true
 set WYZER_TTS_ENGINE=piper
-set WYZER_PIPER_EXE_PATH=./assets/piper/piper.exe
-set WYZER_PIPER_MODEL_PATH=./assets/piper/en_US-voice.onnx
+set WYZER_PIPER_EXE_PATH=.\wyzer\assets\piper\piper.exe
+set WYZER_PIPER_MODEL_PATH=.\wyzer\assets\piper\en_US-lessac-medium.onnx
 set WYZER_SPEAK_HOTWORD_INTERRUPT=true
 set WYZER_SPEAK_START_COOLDOWN_SEC=1.8
 set WYZER_POST_SPEAK_DRAIN_SEC=0.35
@@ -276,28 +246,26 @@ Or modify defaults in [wyzer/core/config.py](wyzer/core/config.py).
 
 #### Piper Executable Not Found
 ```
-Error: Piper executable not found: ./assets/piper/piper.exe
+Error: Piper executable not found: ./wyzer/assets/piper/piper.exe
 ```
 
 **Solutions**:
-1. Download Piper from https://github.com/rhasspy/piper/releases
-2. Extract and place `piper.exe` in `assets/piper/` folder
-3. Or use a different path:
+1. Verify `wyzer/assets/piper/piper.exe` exists in this repo
+2. Or point to a different Piper executable:
    ```bash
    python run.py --piper-exe C:\path\to\piper.exe
    ```
 
 #### Piper Model Not Found
 ```
-Error: Piper model not found at: ./assets/piper/en_US-voice.onnx
+Error: Piper model not found at: ./wyzer/assets/piper/en_US-lessac-medium.onnx
 ```
 
 **Solutions**:
-1. Download a voice model from https://github.com/rhasspy/piper/blob/master/VOICES.md
-2. Place both `.onnx` and `.onnx.json` files in `assets/piper/`
-3. Specify model path:
+1. Verify `wyzer/assets/piper/en_US-lessac-medium.onnx` exists in this repo
+2. Or specify a different model path:
    ```bash
-   python run.py --piper-model assets/piper/en_US-lessac-medium.onnx
+   python run.py --piper-model .\path\to\voice.onnx
    ```
 
 #### No Audio Output from TTS
@@ -310,7 +278,7 @@ Error: Piper model not found at: ./assets/piper/en_US-voice.onnx
    ```
 3. Test Piper directly:
    ```bash
-   echo "test" | .\assets\piper\piper.exe -m .\assets\piper\en_US-lessac-medium.onnx -f test.wav
+   echo "test" | .\wyzer\assets\piper\piper.exe -m .\wyzer\assets\piper\en_US-lessac-medium.onnx -f test.wav
    ```
 
 #### Barge-in Not Working
@@ -364,8 +332,7 @@ If the hotword is detected again immediately after interrupting TTS (barge-in), 
    ```bash
    set WYZER_POST_BARGEIN_REQUIRE_SPEECH_START=false
    ```
-   set WYZER_HOTWORD_COOLDOWN_SEC=2.0
-   ```
+
 
 ### Ollama / LLM Issues
 
@@ -580,10 +547,10 @@ pip list | findstr "sounddevice openwakeword faster-whisper"
 3. **Virtual environment activation**:
    ```bash
    # PowerShell
-   venv\Scripts\Activate.ps1
+   .venv\Scripts\Activate.ps1
    
    # CMD
-   venv\Scripts\activate.bat
+   .venv\Scripts\activate.bat
    ```
 
 ## Development Notes
@@ -650,24 +617,24 @@ Phase 4-5 uses background threads to prevent audio queue overflow:
 
 ### Adding Custom Hotwords
 
-openWakeWord supports custom models. To add your own:
+openWakeWord supports custom ONNX models. To add your own:
 
-1. Train or download a custom `.tflite` or `.onnx` model
-2. Set path via environment:
+1. Train or download a custom `.onnx` model
+2. Set the path via environment:
    ```bash
-   set WYZER_HOTWORD_MODEL_PATH=path/to/model.onnx
-   ```## Current Limitations
+   set WYZER_HOTWORD_MODEL_PATH=path\\to\\model.onnx
+   ```
+
+## Current Limitations
 
 1. **No conversation memory**: Each interaction is independent (stateless)
-2. **No tool calling**: LLM can't perform actions or access external data
-3. **No function calls**: Pure conversational AI only
-4. **Basic resampling**: Uses linear interpolation (scipy would be better)
-5. **Energy VAD fallback**: Less accurate than Silero
-6. **Single-turn conversations**: No context from previous exchanges
+2. **Tools are allowlisted**: The assistant can only do what the local tool registry supports
+3. **Basic resampling**: Uses linear interpolation (scipy would be better)
+4. **Energy VAD fallback**: Less accurate than Silero
+5. **Single-turn conversations**: No context from previous exchanges
 
 ## Future Phases (Not Implemented)
 
-- Phase 6: Tool calling system
 - Phase 7: Conversation memory / context
 - Phase 8: GUI/system tray
 - Phase 9: Multi-turn conversations
@@ -696,4 +663,4 @@ Core libraries:
 
 External dependencies:
 - **Ollama**: LLM inference (install separately)
-- **Piper**: TTS synthesis (download executable + models)
+- **Piper**: TTS synthesis (bundled in `wyzer/assets/piper/` for Windows)
