@@ -355,6 +355,10 @@ def get_cached_index() -> Dict[str, Any]:
             data["uwp_apps"] = []
         if "uwp_scan_meta" not in data:
             data["uwp_scan_meta"] = {}
+
+        # Always overlay aliases from aliases.json so new aliases take effect
+        # immediately without requiring a full refresh.
+        data["aliases"] = _load_aliases()
         
         return data
     except Exception:

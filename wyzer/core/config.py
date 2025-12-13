@@ -80,6 +80,10 @@ class Config:
         ""
     ).split(",") if os.environ.get("WYZER_ALLOWED_PROCESSES_TO_CLOSE") else []
     REQUIRE_EXPLICIT_APP_MATCH: bool = os.environ.get("WYZER_REQUIRE_EXPLICIT_APP_MATCH", "true").lower() in ("true", "1", "yes")
+
+    # LocalLibrary Auto-Alias (learn spoken phrases -> targets)
+    AUTO_ALIAS_ENABLED: bool = os.environ.get("WYZER_AUTO_ALIAS_ENABLED", "true").lower() in ("true", "1", "yes")
+    AUTO_ALIAS_MIN_CONFIDENCE: float = float(os.environ.get("WYZER_AUTO_ALIAS_MIN_CONFIDENCE", "0.85"))
     
     @classmethod
     def get_frame_duration_ms(cls) -> float:

@@ -78,6 +78,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
         return {
             "type": alias_data.get("type", "unknown"),
             "path": alias_data.get("target", ""),
+            "matched_name": query,
             "confidence": 1.0,
             "candidates": []
         }
@@ -95,6 +96,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
                 "path": game["launch"]["target"],
                 "launch": game["launch"],
                 "game_name": game["name"],
+                "matched_name": game["name"],
                 "confidence": game["confidence"],
                 "candidates": []
             }
@@ -106,6 +108,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
                 "path": game["launch"]["target"],
                 "launch": game["launch"],
                 "game_name": game["name"],
+                "matched_name": game["name"],
                 "confidence": game["confidence"] * 0.95,  # Slightly lower for alias match
                 "candidates": []
             }
@@ -125,6 +128,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
                 "confidence": 0.95,
                 "launch": {"type": "uwp", "target": uwp_app["app_id"]},
                 "app_name": uwp_app["name"],
+                "matched_name": uwp_app["name"],
                 "candidates": []
             }
         
@@ -136,6 +140,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
                 "confidence": 0.90,
                 "launch": {"type": "uwp", "target": uwp_app["app_id"]},
                 "app_name": uwp_app["name"],
+                "matched_name": uwp_app["name"],
                 "candidates": []
             }
     
@@ -145,6 +150,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
         return {
             "type": "folder",
             "path": folders[query],
+            "matched_name": query,
             "confidence": 1.0,
             "candidates": []
         }
@@ -156,6 +162,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
         return {
             "type": "app",
             "path": app_data.get("path", ""),
+            "matched_name": query,
             "confidence": 0.95,  # Start Menu apps have high confidence
             "candidates": []
         }
@@ -168,6 +175,7 @@ def _try_exact_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
             return {
                 "type": "app",
                 "path": app["exe_path"],
+                "matched_name": app["name"],
                 "confidence": 0.90,  # Tier 2 exact match
                 "candidates": []
             }
@@ -336,6 +344,8 @@ def _try_fuzzy_match(query: str, index: Dict[str, Any], has_game_intent: bool = 
         result = {
             "type": best["type"],
             "path": best["path"],
+            "matched_name": best.get("name", ""),
+            "matched_source": best.get("source", ""),
             "confidence": best["confidence"],
             "candidates": unique_candidates[1:5]  # Include up to 4 alternatives
         }

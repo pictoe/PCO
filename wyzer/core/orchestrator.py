@@ -7,11 +7,14 @@ import json
 import time
 import urllib.request
 import urllib.error
+import re
+from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 from wyzer.core.config import Config
 from wyzer.core.logger import get_logger
 from wyzer.tools.registry import build_default_registry
 from wyzer.tools.validation import validate_args
+from wyzer.local_library import resolve_target
 from wyzer.core.intent_plan import (
     normalize_plan,
     validate_intents,
@@ -61,6 +64,10 @@ def handle_user_text(text: str) -> Dict[str, Any]:
         
         # Normalize LLM response to standard IntentPlan format
         intent_plan = normalize_plan(llm_response)
+
+        # Heuristic rewrite: fix common LLM confusion where a game/app name
+        # gets turned into an open_website URL (e.g., "Rocket League" -> rocketleague.com)
+        _rewrite_open_website_intents(text, intent_plan.intents)
         
         # Check if there are any intents to execute
         if intent_plan.intents:
@@ -153,6 +160,13 @@ def _execute_intents(intents, registry) -> ExecutionSummary:
         
         # Check if execution was successful
         has_error = "error" in tool_result
+
+        error_type = None
+        if has_error:
+            try:
+                error_type = (tool_result.get("error") or {}).get("type")
+            except Exception:
+                error_type = None
         
         # Create execution result
         exec_result = ExecutionResult(
@@ -166,6 +180,11 @@ def _execute_intents(intents, registry) -> ExecutionSummary:
         
         # If error occurred and continue_on_error is False, stop execution
         if has_error and not intent.continue_on_error:
+            # Focus is often an optional first step before window operations.
+            # If it fails to locate the window, still try subsequent actions.
+            if intent.tool == "focus_window" and idx < (len(intents) - 1) and error_type == "window_not_found":
+                logger.info(f"[INTENT {idx + 1}/{len(intents)}] Focus failed (window_not_found), continuing")
+                continue
             logger.info(f"[INTENT {idx + 1}/{len(intents)}] Failed, stopping execution")
             stopped_early = True
             break
@@ -173,6 +192,109 @@ def _execute_intents(intents, registry) -> ExecutionSummary:
         logger.info(f"[INTENT {idx + 1}/{len(intents)}] {'Success' if not has_error else 'Failed (continuing)'}")
     
     return ExecutionSummary(ran=results, stopped_early=stopped_early)
+
+
+def _normalize_alnum(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _user_explicitly_requested_website(text: str) -> bool:
+    t = (text or "").lower()
+    # Keep this conservative to avoid breaking "open youtube" patterns.
+    # Only treat as explicit web intent when the user says so.
+    explicit_markers = [
+        "website",
+        "site",
+        "web site",
+        "web",
+        "url",
+        "link",
+        "http://",
+        "https://",
+        "www.",
+        ".com",
+        ".net",
+        ".org",
+        ".io",
+        "dot com",
+    ]
+    return any(m in t for m in explicit_markers)
+
+
+def _extract_host_base(url: str) -> Optional[str]:
+    if not url:
+        return None
+
+    raw = url.strip()
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.netloc or "").split(":")[0].strip().lower()
+    if not host:
+        return None
+
+    # Drop common prefixes
+    if host.startswith("www."):
+        host = host[4:]
+
+    # Use the left-most label as base (rocketleague.com -> rocketleague)
+    base = host.split(".")[0]
+    base_norm = _normalize_alnum(base)
+    return base_norm or None
+
+
+def _find_matching_phrase_in_text(text: str, target_norm: str, max_ngram: int = 6) -> Optional[str]:
+    """Find a phrase in the user text whose normalized form matches target_norm."""
+    if not text or not target_norm:
+        return None
+
+    # Tokenize while preserving original tokens for reconstruction
+    tokens = re.findall(r"[A-Za-z0-9]+", text)
+    if not tokens:
+        return None
+
+    # Try longer n-grams first (more specific)
+    for n in range(min(max_ngram, len(tokens)), 0, -1):
+        for i in range(0, len(tokens) - n + 1):
+            phrase = " ".join(tokens[i:i + n])
+            phrase_norm = _normalize_alnum(phrase)
+            if phrase_norm == target_norm:
+                return phrase
+
+    return None
+
+
+def _rewrite_open_website_intents(user_text: str, intents) -> None:
+    """Rewrite certain open_website intents to open_target when they likely refer to an installed app/game."""
+    if not intents:
+        return
+
+    if _user_explicitly_requested_website(user_text):
+        return
+
+    for intent in intents:
+        if intent.tool != "open_website":
+            continue
+
+        url = (intent.args or {}).get("url", "")
+        base_norm = _extract_host_base(url)
+        if not base_norm:
+            continue
+
+        phrase = _find_matching_phrase_in_text(user_text, base_norm)
+        if not phrase:
+            continue
+
+        try:
+            resolved = resolve_target(phrase)
+        except Exception:
+            continue
+
+        r_type = resolved.get("type")
+        confidence = float(resolved.get("confidence", 0) or 0)
+
+        # Only rewrite when we're pretty confident it's a local thing.
+        if r_type in {"game", "app", "uwp", "folder", "file"} and confidence >= 0.6:
+            intent.tool = "open_target"
+            intent.args = {"query": phrase}
 
 
 def _execute_tool(registry, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -233,7 +355,10 @@ Available tools:
 {tools_desc}
 
 TOOL USAGE GUIDANCE:
-- For "open X" requests: ALWAYS use open_target for folders/apps (downloads, documents, chrome, notepad, etc.). Use open_website ONLY for explicit URLs/websites.
+- For "open X" requests:
+    - If X is an installed app/game/folder/file name, use open_target with query=X.
+    - Use open_website ONLY when the user explicitly requests a website/URL (e.g., says "website", provides a domain like "example.com", or says "go to ...").
+    - Do NOT invent URLs for non-web apps/games. (Example: "open Rocket League" is a game -> open_target, not open_website.)
 - For window control: use focus_window, minimize_window, maximize_window, close_window, or move_window_to_monitor
   - move_window_to_monitor: Use monitor="primary" for primary monitor, or monitor=0/1/2 for specific monitor index
 - For media control: use media_play_pause, media_next, media_previous for playback; volume_up, volume_down, volume_mute_toggle for audio
@@ -253,6 +378,12 @@ Response: {{"intents": [{{"tool": "open_target", "args": {{"query": "downloads"}
 
 User: "launch chrome and open youtube"
 Response: {{"intents": [{{"tool": "open_target", "args": {{"query": "chrome"}}}}, {{"tool": "open_website", "args": {{"url": "youtube"}}}}], "reply": "Launching Chrome and opening YouTube"}}
+
+User: "open Rocket League"
+Response: {{"intents": [{{"tool": "open_target", "args": {{"query": "Rocket League"}}}}], "reply": "Opening Rocket League"}}
+
+User: "open rocketleague.com"
+Response: {{"intents": [{{"tool": "open_website", "args": {{"url": "rocketleague.com"}}}}], "reply": "Opening rocketleague.com"}}
 
 User: "pause music and mute volume"
 Response: {{"intents": [{{"tool": "media_play_pause", "args": {{}}}}, {{"tool": "volume_mute_toggle", "args": {{}}}}], "reply": "Pausing and muting"}}

@@ -13,7 +13,7 @@ class OpenWebsiteTool(ToolBase):
         """Initialize open_website tool"""
         super().__init__()
         self._name = "open_website"
-        self._description = "Open a website URL in the default browser (accepts 'facebook', 'youtube', 'github.com', or full URLs)"
+        self._description = "Open a website in the default browser (use for explicit websites/URLs like 'youtube', 'github.com', 'rocketleague.com', or full https:// URLs)"
         self._args_schema = {
             "type": "object",
             "properties": {
