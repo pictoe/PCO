@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wyzer AI Assistant - Phase 5
+Wyzer AI Assistant - Phase 6
 Entry point for running the assistant.
 
 Usage:
@@ -8,12 +8,41 @@ Usage:
     python run.py --no-hotword       # Run without hotword (immediate listening)
     python run.py --model medium     # Use different Whisper model
     python run.py --list-devices     # List audio devices
+    
+    # Test tools (Phase 6)
+    set WYZER_TOOLS_TEST=1 & python run.py
 """
 import sys
+import os
 import argparse
 from wyzer.core.logger import init_logger, get_logger
 from wyzer.core.config import Config
 from wyzer.audio.mic_stream import MicStream
+
+
+def test_tools():
+    """Test tool execution via orchestrator"""
+    print("\n" + "=" * 60)
+    print("  WYZER TOOLS TEST MODE - Phase 6")
+    print("=" * 60 + "\n")
+    
+    from wyzer.core.orchestrator import handle_user_text
+    
+    test_queries = [
+        "what time is it",
+        "what's the system information",
+        "open https://example.com"
+    ]
+    
+    for query in test_queries:
+        print(f"User: {query}")
+        result = handle_user_text(query)
+        print(f"Wyzer: {result.get('reply', '(no reply)')}")
+        print()
+    
+    print("=" * 60)
+    print("Test complete. Set WYZER_TOOLS_TEST=0 to run normally.")
+    print("=" * 60 + "\n")
 
 
 def parse_args():
@@ -153,6 +182,11 @@ Examples:
 
 def main():
     """Main entry point"""
+    # Check for tools test mode
+    if os.environ.get("WYZER_TOOLS_TEST", "0") == "1":
+        test_tools()
+        return 0
+    
     args = parse_args()
     
     # Initialize logger

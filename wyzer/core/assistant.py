@@ -481,8 +481,17 @@ class WyzerAssistant:
     def _background_think(self, transcript: str) -> None:
         """Background thread for LLM processing"""
         try:
-            result = self.brain.think(transcript)
-            self.thinking_result = result
+            # Use orchestrator for Phase 6 tool support
+            from wyzer.core.orchestrator import handle_user_text
+            result_dict = handle_user_text(transcript)
+            
+            # Convert orchestrator result to expected format
+            self.thinking_result = {
+                "reply": result_dict.get("reply", ""),
+                "confidence": 0.8,
+                "model": Config.OLLAMA_MODEL,
+                "latency_ms": 0  # Orchestrator handles its own timing
+            }
         except Exception as e:
             self.logger.error(f"Error in background thinking: {e}")
             self.thinking_result = {
