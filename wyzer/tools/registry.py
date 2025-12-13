@@ -89,6 +89,9 @@ def build_default_registry() -> ToolRegistry:
         VolumeDownTool,
         VolumeMuteToggleTool
     )
+
+    # Phase 6 tools - Audio device switching
+    from wyzer.tools.audio_output_device import SetAudioOutputDeviceTool
     
     registry = ToolRegistry()
     
@@ -118,5 +121,8 @@ def build_default_registry() -> ToolRegistry:
     registry.register(VolumeUpTool())
     registry.register(VolumeDownTool())
     registry.register(VolumeMuteToggleTool())
+
+    # Register audio device switching tool
+    registry.register(SetAudioOutputDeviceTool())
     
     return registry

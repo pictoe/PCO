@@ -2,6 +2,8 @@
 # Audio
 sounddevice>=0.4.6
 numpy>=1.24.0
+pycaw>=2023.0
+comtypes>=1.2.0
 
 # VAD & Hotword
 silero-vad>=4.0.0

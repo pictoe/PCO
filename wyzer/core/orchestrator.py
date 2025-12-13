@@ -362,6 +362,7 @@ TOOL USAGE GUIDANCE:
 - For window control: use focus_window, minimize_window, maximize_window, close_window, or move_window_to_monitor
   - move_window_to_monitor: Use monitor="primary" for primary monitor, or monitor=0/1/2 for specific monitor index
 - For media control: use media_play_pause, media_next, media_previous for playback; volume_up, volume_down, volume_mute_toggle for audio
+- For switching the default audio output device (speakers/headset): use set_audio_output_device with device="name" (fuzzy match allowed)
 - For monitor info: use monitor_info to check available monitors
 - For library management: use local_library_refresh to rebuild the index
 
