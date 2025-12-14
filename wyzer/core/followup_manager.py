@@ -113,7 +113,12 @@ class FollowupManager:
         Check if transcript matches an exit phrase.
         
         Normalizes text (lowercase, strip punctuation, strip whitespace)
-        and does substring matching against EXIT_PHRASES.
+        and checks if text is PRIMARILY an exit phrase (not just contains one).
+        
+        Uses word-boundary matching to avoid false positives like:
+        - "how much snow have we got in the past seven days" should NOT match "nothing else"
+        - "no thanks" should match "no"
+        - "stop" should match "stop"
         
         Args:
             text: User's transcript
@@ -126,13 +131,24 @@ class FollowupManager:
         
         # Normalize: lowercase, remove punctuation, strip whitespace
         normalized = self._normalize_text(text)
+        words = normalized.split()
         
-        # Substring match against exit phrases
+        # Check for exact phrase matches or leading phrase matches
         for phrase in self.EXIT_PHRASES:
             phrase_normalized = self._normalize_text(phrase)
-            if phrase_normalized in normalized:
+            phrase_words = phrase_normalized.split()
+            
+            # Exact match
+            if normalized == phrase_normalized:
                 self.logger.info(f"[FOLLOWUP] Exit phrase detected: '{text}' -> '{normalized}'")
                 return True
+            
+            # If text starts with the phrase, it's probably an exit + extra words
+            # e.g., "no thanks" starts with "no"
+            if len(phrase_words) > 0 and len(words) >= len(phrase_words):
+                if words[:len(phrase_words)] == phrase_words:
+                    self.logger.info(f"[FOLLOWUP] Exit phrase detected: '{text}' -> '{normalized}'")
+                    return True
         
         return False
     
