@@ -1,12 +1,22 @@
-"""
-Main assistant coordinator for Wyzer AI Assistant.
-Manages state machine and orchestrates audio pipeline and STT.
+"""wyzer.core.assistant
+
+Contains the original single-process `WyzerAssistant` and the new multiprocess
+split implementation `WyzerAssistantMultiprocess`.
+
+Multiprocess architecture:
+- Process A (realtime core): mic stream + VAD + hotword + state machine
+- Process B (brain worker): STT + LLM + tools + TTS
+
+The original class is kept for `--single-process` debugging.
 """
 import time
+import os
 import numpy as np
 import threading
+import tempfile
+import wave
 from queue import Queue, Empty
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from wyzer.core.config import Config
 from wyzer.core.logger import get_logger
 from wyzer.core.state import AssistantState, RuntimeState
@@ -14,9 +24,12 @@ from wyzer.audio.mic_stream import MicStream
 from wyzer.audio.vad import VadDetector
 from wyzer.audio.hotword import HotwordDetector
 from wyzer.audio.audio_utils import concat_audio_frames
+from wyzer.audio.audio_utils import audio_to_int16
 from wyzer.stt.stt_router import STTRouter
 from wyzer.brain.llm_engine import LLMEngine
 from wyzer.tts.tts_router import TTSRouter
+from wyzer.core.ipc import new_id, safe_put
+from wyzer.core.process_manager import start_brain_process, stop_brain_process
 
 
 class WyzerAssistant:
@@ -670,6 +683,389 @@ class WyzerAssistant:
     
     def _clear_bargein_flags(self) -> None:
         """Clear all barge-in related flags"""
+        if self._bargein_pending_speech:
+            self.logger.debug("Clearing barge-in pending speech flags")
+        self._bargein_pending_speech = False
+        self._bargein_wait_speech_deadline_ts = 0.0
+
+
+class WyzerAssistantMultiprocess:
+    """Realtime-core assistant that offloads heavy work to a Brain Worker process."""
+
+    def __init__(
+        self,
+        enable_hotword: bool = True,
+        whisper_model: str = "small",
+        whisper_device: str = "cpu",
+        whisper_compute_type: str = "int8",
+        audio_device: Optional[int] = None,
+        llm_mode: str = "ollama",
+        ollama_model: str = "llama3.1:latest",
+        ollama_url: str = "http://127.0.0.1:11434",
+        llm_timeout: int = 30,
+        tts_enabled: bool = True,
+        tts_engine: str = "piper",
+        piper_exe_path: str = "./wyzer/assets/piper/piper.exe",
+        piper_model_path: str = "./wyzer/assets/piper/en_US-lessac-medium.onnx",
+        piper_speaker_id: Optional[int] = None,
+        tts_output_device: Optional[int] = None,
+        speak_hotword_interrupt: bool = True,
+        log_level: str = "INFO",
+        ipc_queue_maxsize: int = 50,
+    ):
+        self.logger = get_logger()
+
+        self.enable_hotword = enable_hotword
+        self.speak_hotword_interrupt = speak_hotword_interrupt
+
+        # State
+        self.state = RuntimeState()
+        self.running = False
+        self.last_hotword_time: float = 0.0
+
+        # Post-barge-in speech gating
+        self._bargein_pending_speech: bool = False
+        self._bargein_wait_speech_deadline_ts: float = 0.0
+        self._speaking_start_ts: float = 0.0
+
+        # Audio buffer
+        self.audio_buffer: List[np.ndarray] = []
+
+        # Audio stream
+        self.audio_queue: Queue = Queue(maxsize=Config.AUDIO_QUEUE_MAX_SIZE)
+        self.mic_stream = MicStream(audio_queue=self.audio_queue, device=audio_device)
+
+        # VAD + hotword
+        self.vad = VadDetector()
+        self.hotword: Optional[HotwordDetector] = None
+        if self.enable_hotword:
+            try:
+                self.hotword = HotwordDetector()
+                self.logger.info(f"Hotword detection enabled for: {Config.HOTWORD_KEYWORDS}")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize hotword detector: {e}")
+                self.logger.warning("Continuing without hotword detection")
+                self.enable_hotword = False
+
+        # Brain worker process + IPC
+        self._brain_proc = None
+        self._core_to_brain_q = None
+        self._brain_to_core_q = None
+
+        # Brain speaking flag (driven by worker LOG events)
+        self._brain_speaking: bool = False
+
+        self._exit_after_tts: bool = False
+
+        self._brain_config: Dict[str, Any] = {
+            "log_level": log_level,
+            "ipc_queue_maxsize": ipc_queue_maxsize,
+            "whisper_model": whisper_model,
+            "whisper_device": whisper_device,
+            "whisper_compute_type": whisper_compute_type,
+            "llm_mode": llm_mode,
+            "ollama_model": ollama_model,
+            "ollama_url": ollama_url,
+            "llm_timeout": llm_timeout,
+            "tts_enabled": bool(tts_enabled),
+            "tts_engine": tts_engine,
+            "piper_exe_path": piper_exe_path,
+            "piper_model_path": piper_model_path,
+            "piper_speaker_id": piper_speaker_id,
+            "tts_output_device": tts_output_device,
+        }
+
+    def start(self) -> None:
+        if self.running:
+            self.logger.warning("Assistant already running")
+            return
+
+        self.logger.info("Starting Wyzer Assistant (multiprocess)...")
+        self.running = True
+
+        self._brain_proc, self._core_to_brain_q, self._brain_to_core_q = start_brain_process(self._brain_config)
+
+        self.mic_stream.start()
+
+        if not self.enable_hotword:
+            self.logger.info("No-hotword mode: Starting immediate listening")
+            self.state.transition_to(AssistantState.LISTENING)
+            self.logger.info("Listening... (speak now)")
+        else:
+            self.logger.info(f"Listening for hotword: {Config.HOTWORD_KEYWORDS}")
+
+        try:
+            self._main_loop()
+        except KeyboardInterrupt:
+            self.logger.info("Keyboard interrupt received")
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        if not self.running:
+            return
+
+        self.logger.info("Stopping Wyzer Assistant...")
+        self.running = False
+
+        try:
+            self.mic_stream.stop()
+        except Exception:
+            pass
+
+        if self._brain_proc and self._core_to_brain_q:
+            stop_brain_process(self._brain_proc, self._core_to_brain_q)
+
+        self.logger.info("Wyzer Assistant stopped")
+
+    def _main_loop(self) -> None:
+        while self.running:
+            # Drain brain->core messages first to keep UI/logging snappy
+            self._poll_brain_messages()
+
+            try:
+                audio_frame = self.audio_queue.get(timeout=0.05)
+            except Empty:
+                # Also allow hotword gating timeouts in LISTENING
+                if self.state.is_in_state(AssistantState.LISTENING):
+                    self._process_listening_timeout_tick()
+                continue
+
+            if self.state.is_in_state(AssistantState.IDLE):
+                self._process_idle(audio_frame)
+            elif self.state.is_in_state(AssistantState.LISTENING):
+                self._process_listening(audio_frame)
+            else:
+                # In multiprocess mode, treat non-listening states like IDLE for hotword/barge-in.
+                self._process_idle(audio_frame)
+
+    def _process_idle(self, audio_frame: np.ndarray) -> None:
+        if not (self.enable_hotword and self.hotword):
+            return
+
+        current_time = time.time()
+        detected_keyword, score = self.hotword.detect(audio_frame)
+
+        if not detected_keyword:
+            return
+
+        time_since_last = current_time - self.last_hotword_time
+        if time_since_last < Config.HOTWORD_COOLDOWN_SEC:
+            self.logger.debug(
+                f"Hotword cooldown active: {time_since_last:.2f}s < {Config.HOTWORD_COOLDOWN_SEC}s (score: {score:.3f})"
+            )
+            return
+
+        self.logger.info(f"Hotword '{detected_keyword}' accepted after cooldown")
+        self.last_hotword_time = current_time
+
+        # Hotword must barge-in instantly if TTS is speaking.
+        # Only send INTERRUPT when the worker reports it's speaking.
+        if self.speak_hotword_interrupt and self._brain_speaking and self._core_to_brain_q:
+            safe_put(self._core_to_brain_q, {"type": "INTERRUPT", "reason": "hotword"})
+
+        # Drain a bit more to remove residual hotword audio
+        self._drain_audio_queue(Config.POST_IDLE_DRAIN_SEC)
+
+        self.state.transition_to(AssistantState.LISTENING)
+        self.audio_buffer = []
+        self.logger.info("Listening... (speak now)")
+
+    def _process_listening_timeout_tick(self) -> None:
+        if not self._bargein_pending_speech:
+            return
+        current_time = time.time()
+        if current_time > self._bargein_wait_speech_deadline_ts:
+            self.logger.info("Post-barge-in speech wait timeout - returning to IDLE")
+            self._clear_bargein_flags()
+            self._reset_to_idle()
+
+    def _process_listening(self, audio_frame: np.ndarray) -> None:
+        # Post-barge-in speech gating
+        if self._bargein_pending_speech:
+            current_time = time.time()
+            if current_time > self._bargein_wait_speech_deadline_ts:
+                self.logger.info("Post-barge-in speech wait timeout - returning to IDLE")
+                self._clear_bargein_flags()
+                self._reset_to_idle()
+                return
+
+        self.audio_buffer.append(audio_frame)
+        self.state.total_frames_recorded += 1
+
+        is_speech = self.vad.is_speech(audio_frame)
+        if is_speech:
+            if not self.state.speech_detected:
+                self.logger.debug("Speech started")
+                self.state.speech_detected = True
+                if self._bargein_pending_speech:
+                    self.logger.debug("Speech started after barge-in - clearing pending flag")
+                    self._bargein_pending_speech = False
+            self.state.speech_frames_count += 1
+            self.state.silence_frames = 0
+        else:
+            if self.state.speech_detected:
+                self.state.silence_frames += 1
+
+        should_stop = False
+        stop_reason = ""
+        if (
+            self.state.speech_detected
+            and self.state.silence_frames >= Config.get_silence_timeout_frames()
+        ):
+            should_stop = True
+            stop_reason = "silence timeout"
+        if self.state.total_frames_recorded >= Config.get_max_record_frames():
+            should_stop = True
+            stop_reason = "max duration"
+        if (
+            not self.enable_hotword
+            and self.state.speech_detected
+            and self.state.silence_frames >= Config.get_silence_timeout_frames()
+        ):
+            should_stop = True
+            stop_reason = "utterance complete (no-hotword mode)"
+
+        if not should_stop:
+            return
+
+        self.logger.info(f"Recording stopped: {stop_reason}")
+
+        if self.state.speech_frames_count <= 0:
+            self.logger.warning("No speech detected in recording")
+            if not self.enable_hotword:
+                self.logger.info("No-hotword mode: Exiting")
+                self.running = False
+            else:
+                self._reset_to_idle()
+            return
+
+        self._send_audio_to_brain()
+
+        # Return to IDLE immediately so hotword stays responsive.
+        if self.enable_hotword:
+            self._reset_to_idle()
+        else:
+            # In no-hotword mode, wait for RESULT then exit after TTS completes.
+            self.state.transition_to(AssistantState.IDLE)
+
+    def _send_audio_to_brain(self) -> None:
+        if not self._core_to_brain_q:
+            self.logger.error("Brain worker queue not available")
+            return
+
+        self._clear_bargein_flags()
+        audio_data = concat_audio_frames(self.audio_buffer)
+        self.audio_buffer = []
+
+        # Save to temp WAV (keeps IPC lightweight on slow PCs)
+        wav_path = None
+        try:
+            fd, wav_path = tempfile.mkstemp(prefix="wyzer_", suffix=".wav")
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            int16_audio = audio_to_int16(audio_data)
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(Config.SAMPLE_RATE)
+                wf.writeframes(int16_audio.tobytes())
+        except Exception as e:
+            self.logger.error(f"Failed to write temp WAV: {e}")
+            try:
+                if wav_path:
+                    os.unlink(wav_path)
+            except Exception:
+                pass
+            return
+
+        req_id = new_id()
+        safe_put(
+            self._core_to_brain_q,
+            {
+                "type": "AUDIO",
+                "id": req_id,
+                "wav_path": wav_path,
+                "pcm_bytes": None,
+                "sample_rate": Config.SAMPLE_RATE,
+                "meta": {},
+            },
+        )
+
+    def _poll_brain_messages(self) -> None:
+        if not self._brain_to_core_q:
+            return
+
+        while True:
+            try:
+                msg = self._brain_to_core_q.get_nowait()
+            except Exception:
+                return
+
+            mtype = (msg or {}).get("type")
+            if mtype == "LOG":
+                level = str(msg.get("level", "INFO")).upper()
+                text = str(msg.get("msg", ""))
+
+                if text == "tts_started":
+                    self._brain_speaking = True
+                elif text in {"tts_finished", "tts_interrupted"}:
+                    self._brain_speaking = False
+
+                if level == "DEBUG":
+                    self.logger.debug(text)
+                elif level == "WARNING":
+                    self.logger.warning(text)
+                elif level == "ERROR":
+                    self.logger.error(text)
+                else:
+                    self.logger.info(text)
+
+                # No-hotword mode: exit after speech finishes
+                if not self.enable_hotword and self._exit_after_tts and text in {"tts_finished", "tts_interrupted"}:
+                    self.running = False
+                continue
+
+            if mtype == "RESULT":
+                meta = msg.get("meta") or {}
+                user_text = str(meta.get("user_text") or "").strip()
+                if user_text:
+                    print(f"\nYou: {user_text}")
+
+                reply = str(msg.get("reply", ""))
+                print(f"\nWyzer: {reply}\n")
+
+                tts_text = msg.get("tts_text")
+                if not self.enable_hotword:
+                    # Exit after TTS completes (if any)
+                    self._exit_after_tts = bool(tts_text)
+                    if not tts_text:
+                        self.running = False
+                continue
+
+            # Unknown message types are ignored
+
+    def _reset_to_idle(self) -> None:
+        self._clear_bargein_flags()
+        self.audio_buffer = []
+        self._drain_audio_queue(Config.POST_IDLE_DRAIN_SEC)
+        self.state.transition_to(AssistantState.IDLE)
+        if self.enable_hotword:
+            self.logger.info(f"Ready. Listening for hotword: {Config.HOTWORD_KEYWORDS}")
+
+    def _drain_audio_queue(self, duration_sec: float) -> None:
+        drain_frames = int(duration_sec * Config.SAMPLE_RATE / Config.CHUNK_SAMPLES)
+        for _ in range(drain_frames):
+            try:
+                frame = self.audio_queue.get_nowait()
+                if self.hotword:
+                    self.hotword.detect(frame)
+            except Empty:
+                break
+
+    def _clear_bargein_flags(self) -> None:
         if self._bargein_pending_speech:
             self.logger.debug("Clearing barge-in pending speech flags")
         self._bargein_pending_speech = False

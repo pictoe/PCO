@@ -15,6 +15,7 @@ Usage:
 import sys
 import os
 import argparse
+import multiprocessing as mp
 from wyzer.core.logger import init_logger, get_logger
 from wyzer.core.config import Config
 from wyzer.audio.mic_stream import MicStream
@@ -81,6 +82,20 @@ Examples:
         """
     )
     
+    parser.add_argument(
+        "--single-process",
+        action="store_true",
+        help="Run everything in one process (legacy path; easier debugging)"
+    )
+
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="normal",
+        choices=["low_end", "normal"],
+        help="Performance profile (default: normal)"
+    )
+
     parser.add_argument(
         "--no-hotword",
         action="store_true",
@@ -213,6 +228,16 @@ def main():
     # Initialize logger
     init_logger(args.log_level)
     logger = get_logger()
+
+    # Apply profile tweaks (keep behavior identical by default)
+    whisper_compute_type = "int8"
+    if args.profile == "low_end":
+        whisper_compute_type = "int8"
+        # Optional: allow user to provide a smaller Ollama model via env
+        if args.ollama_model == "llama3.1:latest":
+            low_end_model = os.environ.get("WYZER_OLLAMA_MODEL_LOW_END")
+            if low_end_model:
+                args.ollama_model = low_end_model
     
     # List devices if requested
     if args.list_devices:
@@ -244,6 +269,8 @@ def main():
     print("=" * 60)
     print(f"  Whisper Model: {args.model}")
     print(f"  Whisper Device: {args.whisper_device}")
+    print(f"  Profile: {args.profile}")
+    print(f"  Single Process: {args.single_process}")
     print(f"  Hotword Enabled: {not args.no_hotword}")
     if not args.no_hotword:
         print(f"  Hotword Keywords: {', '.join(Config.HOTWORD_KEYWORDS)}")
@@ -262,7 +289,7 @@ def main():
     
     # Import assistant (after logger is initialized)
     try:
-        from wyzer.core.assistant import WyzerAssistant
+        from wyzer.core.assistant import WyzerAssistant, WyzerAssistantMultiprocess
     except ImportError as e:
         logger.error(f"Failed to import assistant: {e}")
         logger.error("Make sure all dependencies are installed: pip install -r requirements.txt")
@@ -270,22 +297,42 @@ def main():
     
     # Create and start assistant
     try:
-        assistant = WyzerAssistant(
-            enable_hotword=not args.no_hotword,
-            whisper_model=args.model,
-            whisper_device=args.whisper_device,
-            audio_device=audio_device,
-            llm_mode=args.llm,
-            ollama_model=args.ollama_model,
-            ollama_url=args.ollama_url,
-            llm_timeout=args.llm_timeout,
-            tts_enabled=(args.tts == "on"),
-            tts_engine=args.tts_engine,
-            piper_exe_path=args.piper_exe,
-            piper_model_path=args.piper_model,
-            tts_output_device=tts_output_device,
-            speak_hotword_interrupt=not args.no_speak_interrupt
-        )
+        if args.single_process:
+            assistant = WyzerAssistant(
+                enable_hotword=not args.no_hotword,
+                whisper_model=args.model,
+                whisper_device=args.whisper_device,
+                audio_device=audio_device,
+                llm_mode=args.llm,
+                ollama_model=args.ollama_model,
+                ollama_url=args.ollama_url,
+                llm_timeout=args.llm_timeout,
+                tts_enabled=(args.tts == "on"),
+                tts_engine=args.tts_engine,
+                piper_exe_path=args.piper_exe,
+                piper_model_path=args.piper_model,
+                tts_output_device=tts_output_device,
+                speak_hotword_interrupt=not args.no_speak_interrupt,
+            )
+        else:
+            assistant = WyzerAssistantMultiprocess(
+                enable_hotword=not args.no_hotword,
+                whisper_model=args.model,
+                whisper_device=args.whisper_device,
+                whisper_compute_type=whisper_compute_type,
+                audio_device=audio_device,
+                llm_mode=args.llm,
+                ollama_model=args.ollama_model,
+                ollama_url=args.ollama_url,
+                llm_timeout=args.llm_timeout,
+                tts_enabled=(args.tts == "on"),
+                tts_engine=args.tts_engine,
+                piper_exe_path=args.piper_exe,
+                piper_model_path=args.piper_model,
+                tts_output_device=tts_output_device,
+                speak_hotword_interrupt=not args.no_speak_interrupt,
+                log_level=args.log_level,
+            )
         
         logger.info("Starting assistant... (Press Ctrl+C to stop)")
         assistant.start()
@@ -304,4 +351,5 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     sys.exit(main())

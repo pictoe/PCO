@@ -10,6 +10,7 @@ A voice-controlled AI assistant for Windows 10/11 with hotword detection, speech
 - ✅ **Local LLM Brain**: Conversational AI using Ollama (Phase 4)
 - ✅ **Text-to-Speech**: Local, fast Piper TTS (Phase 5)
 - ✅ **Barge-in Support**: Interrupt TTS by saying the hotword (Phase 5)
+- ✅ **Multiprocess Split (Performance)**: Realtime core stays responsive; heavy STT/LLM/tools/TTS run in a separate worker process
 - ✅ **Tool Calling (Phase 6)**: LLM can call safe, allowlisted local tools
 - ✅ **State Machine**: Clean state transitions (IDLE → LISTENING → TRANSCRIBING → THINKING → SPEAKING)
 - ✅ **Cross-platform (core)**: Windows-first; some bundled binaries/tools are Windows-specific
@@ -89,8 +90,14 @@ echo "Hello, this is a test" | .\wyzer\assets\piper\piper.exe -m .\wyzer\assets\
 # Windows convenience launcher (uses .venv\Scripts\python.exe)
 run.bat
 
-# Normal mode with hotword detection, LLM, and TTS
+# Normal mode (default): multiprocess (realtime core + brain worker)
 python run.py
+
+# Debugging: run everything in one process (legacy path)
+python run.py --single-process
+
+# Performance profile for slow PCs (keeps behavior the same; prefers faster settings)
+python run.py --profile low_end
 
 # Specify Piper model path
 python run.py --piper-model .\wyzer\assets\piper\en_US-lessac-medium.onnx
@@ -125,6 +132,11 @@ python run.py --device 1
 # Disable barge-in (no hotword interrupt during speaking)
 python run.py --no-speak-interrupt
 ```
+
+### Windows Notes (multiprocess)
+
+- Wyzer uses Python `multiprocessing` with the `spawn` start method on Windows.
+- The launcher calls `multiprocessing.freeze_support()` to support portable/exe builds.
 
 ## Usage Examples
 
@@ -170,7 +182,10 @@ wyzer/
 │   ├── config.py         # Central configuration
 │   ├── logger.py         # Logging with rich formatting
 │   ├── state.py          # State machine definitions (SPEAKING added)
-│   └── assistant.py      # Main coordinator (TTS integration)
+│   ├── ipc.py            # IPC message schema + helpers
+│   ├── brain_worker.py   # Brain Worker process (STT/LLM/tools/TTS)
+│   ├── process_manager.py# Spawns/stops brain worker
+│   └── assistant.py      # Single-process + multiprocess coordinator
 ├── audio/
 │   ├── mic_stream.py     # Microphone capture
 │   ├── vad.py            # Voice activity detection
@@ -189,6 +204,10 @@ wyzer/
 run.py                    # Entry point
 requirements.txt          # Dependencies
 README.md                 # This file
+
+scripts/
+   test_ipc_roundtrip.py   # Smoke: start worker, send TEXT, expect RESULT
+   test_interrupt.py       # Smoke: interrupt simulated TTS
 ```
 
 ## Configuration
