@@ -60,16 +60,6 @@ def normalize_plan(model_output: Dict[str, Any]) -> IntentPlan:
     reply = model_output.get("reply", "")
     confidence = model_output.get("confidence", 0.8)
     intents_list: List[Intent] = []
-
-    def _extract_reply_from_args(args: Any) -> str:
-        if not isinstance(args, dict):
-            return ""
-        # Common keys LLMs may use when they incorrectly model a reply as a tool.
-        for key in ("reply", "message", "text", "content"):
-            value = args.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
     
     # Check for new multi-intent format
     if "intents" in model_output and model_output["intents"]:
@@ -79,13 +69,6 @@ def normalize_plan(model_output: Dict[str, Any]) -> IntentPlan:
                 if isinstance(raw_intent, dict):
                     tool_name = raw_intent.get("tool", "")
                     if tool_name:
-                        # Compatibility: some models return a pseudo-tool like {"tool": "reply", "args": {"message": "..."}}
-                        # Treat it as a direct reply.
-                        if isinstance(tool_name, str) and tool_name.strip().lower() == "reply":
-                            if not reply:
-                                reply = _extract_reply_from_args(raw_intent.get("args", {}))
-                            continue
-
                         intents_list.append(Intent(
                             tool=tool_name,
                             args=raw_intent.get("args", {}),
@@ -98,29 +81,21 @@ def normalize_plan(model_output: Dict[str, Any]) -> IntentPlan:
         if isinstance(intent_obj, dict):
             tool_name = intent_obj.get("tool", "")
             if tool_name:
-                if isinstance(tool_name, str) and tool_name.strip().lower() == "reply":
-                    if not reply:
-                        reply = _extract_reply_from_args(intent_obj.get("args", {}))
-                else:
-                    intents_list.append(Intent(
-                        tool=tool_name,
-                        args=intent_obj.get("args", {}),
-                        continue_on_error=False
-                    ))
+                intents_list.append(Intent(
+                    tool=tool_name,
+                    args=intent_obj.get("args", {}),
+                    continue_on_error=False
+                ))
     
     # Check for legacy single tool format ({"tool": "..."})
     elif "tool" in model_output and model_output["tool"]:
         tool_name = model_output["tool"]
         if isinstance(tool_name, str) and tool_name:
-            if tool_name.strip().lower() == "reply":
-                if not reply:
-                    reply = _extract_reply_from_args(model_output.get("args", {}))
-            else:
-                intents_list.append(Intent(
-                    tool=tool_name,
-                    args=model_output.get("args", {}),
-                    continue_on_error=False
-                ))
+            intents_list.append(Intent(
+                tool=tool_name,
+                args=model_output.get("args", {}),
+                continue_on_error=False
+            ))
     
     return IntentPlan(
         reply=reply,
