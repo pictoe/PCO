@@ -11,6 +11,7 @@ The original class is kept for `--single-process` debugging.
 """
 import time
 import os
+import random
 import numpy as np
 import threading
 import tempfile
@@ -1435,7 +1436,18 @@ class WyzerAssistantMultiprocess:
         
         # Send follow-up prompt only if the response wasn't a question
         if self._show_followup_prompt and self._core_to_brain_q:
-            prompt = "Is there anything else?"
+            # Randomly select from various follow-up prompts to avoid repetition
+            followup_prompts = [
+                "Is there anything else?",
+                "Anything else I can help with?",
+                "Can I help you with anything else?",
+                "Do you need anything else?",
+                "What else can I do for you?",
+                "Is there anything more?",
+                "Would you like help with something else?",
+                "Anything else?",
+            ]
+            prompt = random.choice(followup_prompts)
             # Print as response in console
             print(f"\nWyzer: {prompt}\n")
             
