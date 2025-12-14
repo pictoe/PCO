@@ -14,7 +14,7 @@ class LocalLibraryRefreshTool(ToolBase):
         """Initialize local_library_refresh tool"""
         super().__init__()
         self._name = "local_library_refresh"
-        self._description = "Refresh the index of local folders, apps, and shortcuts (use when user wants to update or rebuild the library)"
+        self._description = "Refresh/rebuild the index of local folders, apps, and shortcuts. Use ONLY when the user explicitly asks to refresh/rebuild/rescan/update the local library/index."
         self._args_schema = {
             "type": "object",
             "properties": {},

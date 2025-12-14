@@ -94,6 +94,9 @@ def build_default_registry() -> ToolRegistry:
         VolumeMuteToggleTool
     )
 
+    # True volume control (pycaw)
+    from wyzer.tools.volume_control import VolumeControlTool
+
     # Phase 6 tools - Audio device switching
     from wyzer.tools.audio_output_device import SetAudioOutputDeviceTool
     
@@ -129,6 +132,9 @@ def build_default_registry() -> ToolRegistry:
     registry.register(VolumeUpTool())
     registry.register(VolumeDownTool())
     registry.register(VolumeMuteToggleTool())
+
+    # Register true volume control tool
+    registry.register(VolumeControlTool())
 
     # Register audio device switching tool
     registry.register(SetAudioOutputDeviceTool())

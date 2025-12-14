@@ -11,7 +11,7 @@ import re
 import socket
 import shlex
 from urllib.parse import urlparse
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from wyzer.core.config import Config
 from wyzer.core.logger import get_logger
 from wyzer.tools.registry import build_default_registry
@@ -30,7 +30,7 @@ _FASTPATH_SPLIT_RE = re.compile(r"\b(?:and then|then|and)\b", re.IGNORECASE)
 _FASTPATH_COMMA_SPLIT_RE = re.compile(r"\s*,\s*")
 _FASTPATH_SEMI_SPLIT_RE = re.compile(r"\s*;\s*")
 _FASTPATH_COMMAND_TOKEN_RE = re.compile(
-    r"\b(?:tool|run|execute|open|launch|start|close|exit|quit|focus|activate|switch\s+to|minimize|maximize|fullscreen|move|pause|play|resume|mute|unmute|volume\s+up|volume\s+down|turn\s+up|turn\s+down|louder|quieter|set\s+audio|switch\s+audio|change\s+audio|refresh\s+library|rebuild\s+library|weather|forecast|location|system\s+info|system\s+information|monitor\s+info|what\s+time\s+is\s+it|my\s+location|where\s+am\s+i|next\s+(?:track|song)|previous\s+(?:track|song)|prev\s+track)\b",
+    r"\b(?:tool|run|execute|open|launch|start|close|exit|quit|focus|activate|switch\s+to|minimize|maximize|fullscreen|move|pause|play|resume|mute|unmute|volume|sound|audio|volume\s+up|volume\s+down|turn\s+up|turn\s+down|louder|quieter|set\s+audio|switch\s+audio|change\s+audio|refresh\s+library|rebuild\s+library|weather|forecast|location|system\s+info|system\s+information|monitor\s+info|what\s+time\s+is\s+it|my\s+location|where\s+am\s+i|next\s+(?:track|song)|previous\s+(?:track|song)|prev\s+track)\b",
     re.IGNORECASE,
 )
 
@@ -46,6 +46,36 @@ _FASTPATH_COMMON_WEBSITES = {
 }
 
 _FASTPATH_EXPLICIT_TOOL_RE = re.compile(r"^(?:tool|run|execute)\s+(?P<tool>[a-zA-Z0-9_]+)(?:\s+(?P<rest>.*))?$", re.IGNORECASE)
+
+
+def _user_explicitly_requested_library_refresh(user_text: str) -> bool:
+    tl = (user_text or "").lower()
+    has_noun = any(k in tl for k in ["library", "libary", "index"])
+    has_verb = any(k in tl for k in ["refresh", "rebuild", "rescan", "scan", "reindex", "re-index", "update"])
+    return has_noun and has_verb
+
+
+def _filter_spurious_intents(user_text: str, intents: List[Intent]) -> List[Intent]:
+    """Drop obviously irrelevant tool intents.
+
+    This protects against occasional LLM/tool-selection glitches.
+    """
+    logger = get_logger_instance()
+
+    if not intents:
+        return intents
+
+    dropped = []
+    filtered: List[Intent] = []
+    for intent in intents:
+        if intent.tool == "local_library_refresh" and not _user_explicitly_requested_library_refresh(user_text):
+            dropped.append(intent.tool)
+            continue
+        filtered.append(intent)
+
+    if dropped:
+        logger.info(f"[INTENT FILTER] Dropped spurious intent(s): {', '.join(dropped)}")
+    return filtered
 
 # Module-level singleton registry
 _registry = None
@@ -132,6 +162,14 @@ def handle_user_text(text: str) -> Dict[str, Any]:
         # Heuristic rewrite: fix common LLM confusion where a game/app name
         # gets turned into an open_website URL (e.g., "Rocket League" -> rocketleague.com)
         _rewrite_open_website_intents(text, intent_plan.intents)
+
+        # Heuristic filter: prevent obviously irrelevant tool calls (e.g. story requests triggering library refresh).
+        intent_plan.intents = _filter_spurious_intents(text, intent_plan.intents)
+
+        # If we dropped all intents and we have no usable reply, force a reply-only call.
+        if not intent_plan.intents and not (intent_plan.reply or llm_response.get("reply", "")).strip():
+            reply_only = _call_llm_reply_only(text)
+            intent_plan.reply = reply_only.get("reply", "")
         
         # Check if there are any intents to execute
         if intent_plan.intents:
@@ -267,13 +305,136 @@ def _strip_trailing_punct(text: str) -> str:
 
 
 def _extract_int(text: str) -> Optional[int]:
-    m = re.search(r"\b(\d{1,2})\b", text or "")
+    m = re.search(r"\b(\d{1,3})\b", text or "")
     if not m:
         return None
     try:
         return int(m.group(1))
     except Exception:
         return None
+
+
+def _extract_volume_percent(text: str) -> Optional[int]:
+    """Extract a 0-100 volume percent, supporting '100' and optional '%' sign."""
+    m = re.search(r"\b(\d{1,3})\s*%?\b", text or "")
+    if not m:
+        return None
+    try:
+        v = int(m.group(1))
+    except Exception:
+        return None
+    if 0 <= v <= 100:
+        return v
+    return None
+
+
+def _parse_volume_delta_hint(text_lower: str) -> int:
+    """Heuristic delta in percent for phrases like 'a bit', 'a lot'."""
+    tl = text_lower or ""
+    if any(k in tl for k in ["a little", "a bit", "slightly", "tiny bit", "small"]):
+        return 5
+    if any(k in tl for k in ["a lot", "much", "way", "significantly"]):
+        return 20
+    return 10
+
+
+def _parse_volume_scope_and_process(clause: str) -> Tuple[str, str]:
+    """Return (scope, process) where scope is 'master' or 'app'."""
+    c = (clause or "").strip()
+    cl = c.lower()
+
+    # Strip common query prefixes so we don't treat them as app names.
+    # Examples:
+    #   "get volume" -> "volume"
+    #   "what is the volume" -> "volume"
+    #   "what is spotify volume" -> "spotify volume"
+    cl = re.sub(
+        r"^(?:what\s+is|what's|whats|get|check|show|tell\s+me|current)\s+",
+        "",
+        cl,
+    )
+    cl = re.sub(r"^the\s+", "", cl)
+
+    # "set <proc> volume ..." should treat <proc> as app.
+    m = re.match(r"^set\s+(?P<proc>.+?)\s+(?:volume|sound|audio)\b", cl)
+    if m:
+        proc = _strip_trailing_punct(m.group("proc")).strip()
+        if proc and proc not in {"the", "my", "this", "that", "volume", "sound", "audio"}:
+            return "app", proc
+
+    # Examples:
+    #   "spotify volume 30"
+    #   "set spotify volume to 30"
+    #   "volume 30 for spotify"
+    #   "turn down chrome"
+    m = re.search(r"\b(?:for|in|on)\s+(?P<proc>[a-z0-9][a-z0-9 _\-\.]{1,60})$", cl)
+    if m:
+        proc = _strip_trailing_punct(m.group("proc")).strip()
+        if proc:
+            return "app", proc
+
+    # "spotify volume ..." / "chrome sound ..." (but NOT "set volume ...")
+    m = re.match(r"^(?P<first>[a-z0-9][a-z0-9 _\-\.]{1,60})\s+(?:volume|sound|audio)\b", cl)
+    if m:
+        first = _strip_trailing_punct(m.group("first")).strip()
+        if first and first not in {"the", "my", "this", "that", "set", "volume", "sound", "audio"}:
+            return "app", first
+
+    # "turn down spotify" / "mute discord" etc.
+    m = re.match(r"^(?:turn\s+(?:up|down)|mute|unmute|quieter|louder)\s+(?P<proc>.+)$", cl)
+    if m:
+        proc = _strip_trailing_punct(m.group("proc")).strip()
+        proc_l = proc.lower()
+        if proc_l in {"it", "it up", "it down", "the volume", "volume", "sound", "audio"}:
+            return "master", ""
+        if proc and proc not in {"it", "volume", "sound", "audio"}:
+            return "app", proc
+
+    return "master", ""
+
+
+def _coerce_int_like(value: Any) -> Any:
+    """Coerce common numeric string forms (e.g., '35', '35%') to int.
+
+    Returns original value if it can't be safely coerced.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        # Accept integral floats.
+        if value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s.endswith("%"): 
+            s = s[:-1].strip()
+        if re.fullmatch(r"-?\d{1,3}", s):
+            try:
+                return int(s)
+            except Exception:
+                return value
+    return value
+
+
+def _normalize_tool_args(tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+    """Lightweight arg normalization before schema validation."""
+    if tool_name != "volume_control" or not isinstance(tool_args, dict):
+        return tool_args
+
+    normalized = dict(tool_args)
+    if "level" in normalized:
+        normalized["level"] = _coerce_int_like(normalized.get("level"))
+    if "delta" in normalized:
+        normalized["delta"] = _coerce_int_like(normalized.get("delta"))
+    # Normalize scope/action strings.
+    if isinstance(normalized.get("scope"), str):
+        normalized["scope"] = str(normalized.get("scope") or "").strip().lower()
+    if isinstance(normalized.get("action"), str):
+        normalized["action"] = str(normalized.get("action") or "").strip().lower()
+    return normalized
 
 
 def _parse_scalar_value(raw: str) -> Any:
@@ -618,22 +779,140 @@ def _fastpath_parse_clause(clause: str) -> Optional[List[Intent]]:
         return [Intent(tool="set_audio_output_device", args={"device": dev})]
 
     # --- Media / volume ---
-    if any(k in c_lower for k in ["mute", "unmute"]):
-        return [Intent(tool="volume_mute_toggle", args={})]
+    # Prefer true volume control (pycaw) for all volume/mute commands.
+    scope, proc = _parse_volume_scope_and_process(c_raw)
 
-    if any(k in c_lower for k in ["volume up", "turn up", "louder"]):
-        steps = _extract_int(c_lower)
-        args: Dict[str, Any] = {}
-        if steps is not None:
-            args["steps"] = max(1, min(10, steps))
-        return [Intent(tool="volume_up", args=args)]
+    # "turn <target> down to 35%" (target can be master volume keywords or an app name)
+    m = re.match(
+        r"^turn\s+(?P<target>.+?)\s+(?P<dir>up|down)\s+to\s+(?P<pct>\d{1,3})\s*%?$",
+        c_lower,
+    )
+    if m:
+        target = _strip_trailing_punct(m.group("target")).strip()
+        pct = _extract_volume_percent(m.group("pct"))
+        if pct is not None:
+            target_l = target.lower()
+            is_master = target_l in {"volume", "sound", "audio", "the volume", "the sound", "the audio", "master volume"}
+            args: Dict[str, Any] = {"scope": "master" if is_master else "app", "action": "set", "level": pct}
+            if not is_master:
+                args["process"] = target
+            return [Intent(tool="volume_control", args=args)]
 
-    if any(k in c_lower for k in ["volume down", "turn down", "quieter"]):
-        steps = _extract_int(c_lower)
-        args = {}
-        if steps is not None:
-            args["steps"] = max(1, min(10, steps))
-        return [Intent(tool="volume_down", args=args)]
+    # "get volume" / "what is the volume" / per-app "what is spotify volume"
+    is_volume_worded = any(k in c_lower for k in ["volume", "sound", "audio"])
+    is_query = bool(
+        re.search(
+            r"\b(?:get|check|show|tell\s+me|what\s+is|what's|whats|current)\b",
+            c_lower,
+        )
+    )
+    has_adjust_words = any(
+        k in c_lower
+        for k in [
+            "volume up",
+            "volume down",
+            "turn up",
+            "turn down",
+            "louder",
+            "quieter",
+            "raise volume",
+            "lower volume",
+            "increase volume",
+            "decrease volume",
+            "sound up",
+            "sound down",
+        ]
+    )
+    if is_volume_worded and is_query and not has_adjust_words and _extract_volume_percent(c_lower) is None:
+        args: Dict[str, Any] = {"scope": scope, "action": "get"}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
+
+    # "turn it up" / "turn it down" shorthand
+    if re.search(r"\bturn\s+it\s+up\b", c_lower):
+        delta = _parse_volume_delta_hint(c_lower)
+        return [Intent(tool="volume_control", args={"scope": "master", "action": "change", "delta": int(delta)})]
+
+    if re.search(r"\bturn\s+it\s+down\b", c_lower):
+        delta = _parse_volume_delta_hint(c_lower)
+        return [Intent(tool="volume_control", args={"scope": "master", "action": "change", "delta": -int(delta)})]
+
+    # Mute/unmute
+    if "unmute" in c_lower:
+        args: Dict[str, Any] = {"scope": scope, "action": "unmute"}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
+
+    # 'mute' (but not 'unmute')
+    if re.search(r"\bmute\b", c_lower) and "unmute" not in c_lower:
+        args = {"scope": scope, "action": "mute"}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
+
+    # Explicit set: "volume 35" / "set volume to 35" / "spotify volume 35"
+    # Avoid catching "volume down 10" / "turn down" (handled below).
+    if "volume" in c_lower or "sound" in c_lower or "audio" in c_lower:
+        has_adjust_words = any(
+            k in c_lower
+            for k in [
+                "volume up",
+                "volume down",
+                "turn up",
+                "turn down",
+                "louder",
+                "quieter",
+                "raise",
+                "lower",
+                "increase",
+                "decrease",
+                "sound up",
+                "sound down",
+            ]
+        )
+        if not has_adjust_words:
+            percent = _extract_volume_percent(c_lower)
+            if percent is not None:
+                # Require a reasonably clear set pattern.
+                if re.search(r"\b(set\s+)?(?:the\s+)?(?:master\s+)?(?:volume|sound|audio)\s+(?:to\s+)?\d{1,3}\s*%?\b", c_lower) or re.fullmatch(
+                    r"(?:volume|sound|audio)\s+\d{1,3}\s*%?", c_lower
+                ):
+                    args = {"scope": scope, "action": "set", "level": max(0, min(100, int(percent)))}
+                    if scope == "app":
+                        args["process"] = proc
+                    return [Intent(tool="volume_control", args=args)]
+
+    # Up/down adjustments
+    if any(k in c_lower for k in ["volume up", "turn up", "louder", "raise volume", "increase volume", "sound up"]):
+        delta = _parse_volume_delta_hint(c_lower)
+        n = _extract_int(c_lower)
+        if n is not None and 0 <= n <= 100:
+            delta = max(1, min(100, int(n)))
+        args = {"scope": scope, "action": "change", "delta": int(delta)}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
+
+    if any(k in c_lower for k in ["volume down", "turn down", "quieter", "lower volume", "decrease volume", "sound down"]):
+        delta = _parse_volume_delta_hint(c_lower)
+        n = _extract_int(c_lower)
+        if n is not None and 0 <= n <= 100:
+            delta = max(1, min(100, int(n)))
+        args = {"scope": scope, "action": "change", "delta": -int(delta)}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
+
+    # Common shorthand: "sound down a bit" / "sound up"
+    if re.fullmatch(r"(?:sound|audio)\s+(?:up|down)(?:\s+.*)?", c_lower):
+        is_up = " up" in f" {c_lower} "
+        delta = _parse_volume_delta_hint(c_lower)
+        args = {"scope": scope, "action": "change", "delta": int(delta if is_up else -delta)}
+        if scope == "app":
+            args["process"] = proc
+        return [Intent(tool="volume_control", args=args)]
 
     if any(k in c_lower for k in ["next track", "next song", "skip", "next"]):
         return [Intent(tool="media_next", args={})]
@@ -813,12 +1092,50 @@ def _format_fastpath_reply(user_text: str, intents: List[Intent], execution_summ
         if tool in {"media_play_pause", "media_next", "media_previous", "volume_up", "volume_down", "volume_mute_toggle"}:
             return "OK."
 
+        if tool == "volume_control":
+            action = str(args.get("action") or "").lower()
+            scope = str(args.get("scope") or "master").lower()
+            requested_proc = args.get("process")
+
+            display = result.get("display") if isinstance(result, dict) else None
+            proc_res = result.get("process") if isinstance(result, dict) else None
+            target = "volume" if scope != "app" else (display or proc_res or requested_proc or "app volume")
+
+            level = result.get("level") if isinstance(result, dict) else None
+            new_level = result.get("new_level") if isinstance(result, dict) else None
+            muted = result.get("muted") if isinstance(result, dict) else None
+
+            if action == "get":
+                if isinstance(level, int):
+                    return f"{target} is {level}%."
+                return "OK."
+
+            if action == "set":
+                if isinstance(new_level, int):
+                    return f"Set {target} to {new_level}%."
+                if isinstance(args.get("level"), int):
+                    return f"Set {target} to {args.get('level')}%."
+                return "OK."
+
+            if action == "change":
+                if isinstance(new_level, int):
+                    return f"Set {target} to {new_level}%."
+                return "OK."
+
+            if action in {"mute", "unmute", "toggle_mute"}:
+                if isinstance(muted, bool):
+                    if scope == "app":
+                        return f"{target} {'muted' if muted else 'unmuted'}."
+                    return "Muted." if muted else "Unmuted."
+                return "OK."
+
         return "Done."
 
     # Multi-intent: summarize key actions + include the last info response (if any).
     opened: List[str] = []
     audio_switched: Optional[str] = None
     info_sentence: Optional[str] = None
+    volume_fragments: List[str] = []
 
     for idx, intent in enumerate(intents[: len(execution_summary.ran)]):
         res = execution_summary.ran[idx].result or {}
@@ -851,6 +1168,35 @@ def _format_fastpath_reply(user_text: str, intents: List[Intent], execution_summ
                 if isinstance(requested, str) and requested.strip():
                     audio_switched = requested.strip()
 
+        if intent.tool == "volume_control":
+            action = str(args.get("action") or "").lower()
+            scope = str(args.get("scope") or "master").lower()
+            requested_proc = args.get("process")
+
+            display = res.get("display") if isinstance(res, dict) else None
+            proc_res = res.get("process") if isinstance(res, dict) else None
+            target = "volume" if scope != "app" else (display or proc_res or requested_proc or "app volume")
+
+            if action in {"set", "change"}:
+                lvl = res.get("new_level") if isinstance(res, dict) else None
+                if not isinstance(lvl, int):
+                    lvl = args.get("level") if isinstance(args.get("level"), int) else lvl
+                if isinstance(lvl, int):
+                    volume_fragments.append(f"set {target} to {lvl}%")
+                continue
+
+            if action in {"mute", "unmute", "toggle_mute"}:
+                muted = res.get("muted") if isinstance(res, dict) else None
+                if isinstance(muted, bool):
+                    volume_fragments.append(f"{'muted' if muted else 'unmuted'} {target}")
+                continue
+
+            if action == "get":
+                lvl = res.get("level") if isinstance(res, dict) else None
+                if isinstance(lvl, int):
+                    volume_fragments.append(f"{target} is {lvl}%")
+                continue
+
     action_fragments: List[str] = []
     if opened:
         unique_opened: List[str] = []
@@ -871,6 +1217,10 @@ def _format_fastpath_reply(user_text: str, intents: List[Intent], execution_summ
 
     if audio_switched:
         action_fragments.append(f"set audio output to {audio_switched}")
+
+    if volume_fragments:
+        # Keep the last 2 volume-related statements to stay concise.
+        action_fragments.extend(volume_fragments[-2:])
 
     action_sentence: Optional[str] = None
     if action_fragments:
@@ -998,7 +1348,8 @@ def _execute_tool(registry, tool_name: str, tool_args: Dict[str, Any]) -> Dict[s
             }
         }
     
-    # Validate arguments
+    # Normalize + validate arguments
+    tool_args = _normalize_tool_args(tool_name, tool_args or {})
     is_valid, error = validate_args(tool.args_schema, tool_args)
     if not is_valid:
         return {"error": error}
@@ -1048,10 +1399,15 @@ TOOL USAGE GUIDANCE:
     - Do NOT invent URLs for non-web apps/games. (Example: "open Rocket League" is a game -> open_target, not open_website.)
 - For window control: use focus_window, minimize_window, maximize_window, close_window, or move_window_to_monitor
   - move_window_to_monitor: Use monitor="primary" for primary monitor, or monitor=0/1/2 for specific monitor index
-- For media control: use media_play_pause, media_next, media_previous for playback; volume_up, volume_down, volume_mute_toggle for audio
+- For media control: use media_play_pause, media_next, media_previous for playback
+- For volume control: prefer volume_control (supports get/set/change + mute/unmute + per-app volume by process)
+        - Master volume example: {{"tool": "volume_control", "args": {{"scope": "master", "action": "set", "level": 35}}}}
+        - Per-app volume example: {{"tool": "volume_control", "args": {{"scope": "app", "process": "spotify", "action": "change", "delta": -10}}}}
+        - Legacy volume tools volume_up/volume_down/volume_mute_toggle exist but volume_control is preferred
 - For switching the default audio output device (speakers/headset): use set_audio_output_device with device="name" (fuzzy match allowed)
 - For monitor info: use monitor_info to check available monitors
-- For library management: use local_library_refresh to rebuild the index
+- For library management: use local_library_refresh to rebuild the index ONLY when the user explicitly asks to refresh/rebuild/rescan/update the local library/index
+- For creative or conversational requests (e.g., "tell me a story", jokes, roleplay, general chat): do NOT call any tools; respond directly with {{"reply": "..."}}
 - For location: use get_location (approximate IP-based)
 - For weather/forecast: use get_weather_forecast (optionally pass location; otherwise it uses IP-based location)
     - If user asks for Fahrenheit, pass units="fahrenheit" (or units="imperial")
@@ -1110,6 +1466,25 @@ User: {user_text}
 
 Your response (JSON only):"""
 
+    return _ollama_request(prompt)
+
+
+def _call_llm_reply_only(user_text: str) -> Dict[str, Any]:
+    """Force a direct reply with no tool calls.
+
+    Used as a fallback when the LLM returns spurious tool intents.
+    """
+    prompt = f"""You are Wyzer, a local voice assistant.
+
+No tools are available for this request.
+Write a natural response to the user.
+
+RESPONSE FORMAT: JSON only (no markdown):
+{{"reply": "your response"}}
+
+User: {user_text}
+
+Your response (JSON only):"""
     return _ollama_request(prompt)
 
 
@@ -1239,11 +1614,69 @@ def _ollama_request(prompt: str) -> Dict[str, Any]:
         
         # Parse response
         reply_text = response_data.get("response", "").strip()
-        
+
+        def _extract_reply_from_args(args: Any) -> str:
+            if not isinstance(args, dict):
+                return ""
+            for key in ("reply", "message", "text", "content"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return ""
+
+        def _postprocess_llm_json(parsed: Any) -> Any:
+            """Compat layer for models that return a pseudo-tool `reply` inside intents."""
+            if not isinstance(parsed, dict):
+                return parsed
+
+            raw_intents = parsed.get("intents")
+            if isinstance(raw_intents, list) and raw_intents:
+                extracted_reply = ""
+                filtered_intents = []
+                for intent in raw_intents:
+                    if not isinstance(intent, dict):
+                        continue
+                    tool = intent.get("tool")
+                    if isinstance(tool, str) and tool.strip().lower() == "reply":
+                        if not extracted_reply:
+                            extracted_reply = _extract_reply_from_args(intent.get("args", {}))
+                        continue
+                    filtered_intents.append(intent)
+
+                # If the only thing returned was a reply-intent, convert to a direct reply.
+                if not filtered_intents and extracted_reply:
+                    return {"reply": extracted_reply}
+
+                # Otherwise, keep intents but remove the pseudo reply intent.
+                parsed["intents"] = filtered_intents
+                if extracted_reply and (not isinstance(parsed.get("reply"), str) or not parsed.get("reply", "").strip()):
+                    parsed["reply"] = extracted_reply
+
+            # Legacy single-intent format
+            raw_intent = parsed.get("intent")
+            if isinstance(raw_intent, dict):
+                tool = raw_intent.get("tool")
+                if isinstance(tool, str) and tool.strip().lower() == "reply":
+                    extracted_reply = _extract_reply_from_args(raw_intent.get("args", {}))
+                    if extracted_reply:
+                        return {"reply": extracted_reply}
+
+            # Legacy single-tool format
+            tool = parsed.get("tool")
+            if isinstance(tool, str) and tool.strip().lower() == "reply":
+                extracted_reply = _extract_reply_from_args(parsed.get("args", {}))
+                if extracted_reply:
+                    return {"reply": extracted_reply}
+
+            return parsed
+
         # Try to parse as JSON
         try:
             parsed = json.loads(reply_text)
-            return parsed
+            parsed = _postprocess_llm_json(parsed)
+            if isinstance(parsed, dict):
+                return parsed
+            return {"reply": str(parsed)}
         except json.JSONDecodeError:
             # LLM didn't return valid JSON, extract reply if possible
             return {"reply": reply_text if reply_text else "I couldn't process that."}

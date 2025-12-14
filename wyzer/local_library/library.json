@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "timestamp": 1765610075.5357573,
+  "timestamp": 1765696455.8006945,
   "folders": {
     "desktop": "C:\\Users\\kolyw\\Desktop",
     "downloads": "C:\\Users\\kolyw\\Downloads",
@@ -53,10 +53,6 @@
     },
     "tinkercad": {
       "path": "C:\\Users\\kolyw\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Chrome Apps\\Tinkercad.lnk",
-      "type": "shortcut"
-    },
-    "youtube music": {
-      "path": "C:\\Users\\kolyw\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Chrome Apps\\YouTube Music.lnk",
       "type": "shortcut"
     },
     "discord": {
@@ -504,7 +500,12 @@
       "type": "exe"
     }
   },
-  "aliases": {},
+  "aliases": {
+    "vs code": {
+      "type": "app",
+      "target": "C:\\Program Files\\Microsoft VS Code\\Code.exe"
+    }
+  },
   "tier2_apps": [
     {
       "name": "Arduino Ide",
@@ -1667,8 +1668,8 @@
       "install_path": "C:/Program Files/Epic Games/rocketleague",
       "app_id": "Sugar",
       "aliases": [
-        "rocket league\u00ae",
-        "rl"
+        "rl",
+        "rocket league\u00ae"
       ],
       "confidence": 0.95
     },
@@ -1796,8 +1797,8 @@
       "install_path": null,
       "app_id": null,
       "aliases": [
-        "battlestate",
-        "battlestate games launcher"
+        "battlestate games launcher",
+        "battlestate"
       ],
       "confidence": 0.8
     },
@@ -2140,7 +2141,7 @@
     }
   ],
   "games_scan_meta": {
-    "last_refresh": "2025-12-13 02:15:17",
+    "last_refresh": "2025-12-14 02:14:55",
     "counts": {
       "steam": 18,
       "epic": 3,
@@ -2604,14 +2605,8 @@
     }
   ],
   "uwp_scan_meta": {
-    "last_refresh": "2025-12-13 02:15:18",
+    "last_refresh": "2025-12-14 02:14:56",
     "count": 52,
-    "status": "ok"
-  },
-  "chrome_apps": [],
-  "chrome_scan_meta": {
-    "last_refresh": "2025-12-13 02:15:18",
-    "count": 0,
     "status": "ok"
   },
   "scan_meta": {
