@@ -16,6 +16,12 @@ faster-whisper>=0.10.0
 # Utilities
 rich>=13.7.0
 
+# Windows 10/11 WinRT TTS (enables additional built-in voices)
+winrt-Windows.Media.SpeechSynthesis>=3.2.1
+winrt-Windows.Storage.Streams>=3.2.1
+winrt-Windows.Foundation>=3.2.1
+winrt-Windows.Foundation.Collections>=3.2.1
+
 # Phase 4: LLM integration (no additional dependencies - uses urllib from stdlib)
 
 # Note: torch may be auto-installed by silero-vad or faster-whisper

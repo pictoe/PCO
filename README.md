@@ -80,10 +80,28 @@ Piper (Windows) and a default voice model are already included in this repo unde
 echo "Hello, this is a test" | .\wyzer\assets\piper\piper.exe -m .\wyzer\assets\piper\en_US-lessac-medium.onnx -f test.wav
 ```
 
-**Recommended Voice Models**:
-- **Fast & Good**: `en_US-lessac-medium.onnx` (~63 MB)
-- **High Quality**: `en_US-lessac-high.onnx` (~147 MB)
-- **Lightweight**: `en_US-lessac-low.onnx` (~13 MB)
+**Bundled Piper Voice Model**:
+- `en_US-lessac-medium.onnx` (bundled, reliable)
+
+Note: Some community Piper voices may not be compatible with older bundled Piper builds on Windows.
+
+To switch Piper voices, set `WYZER_PIPER_MODEL_PATH` or pass `--piper-model`.
+
+### Windows SAPI TTS (Alternative Voice Option)
+
+If you want a higher-quality, non-robotic male American voice (or other accents), you can use **Windows built-in SAPI voices**:
+
+```bash
+python run.py --tts-engine sapi --sapi-voice "Microsoft David Desktop"
+```
+
+List installed SAPI voices (PowerShell):
+
+```powershell
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }
+```
 
 ### 4. Run Wyzer
 
@@ -252,6 +270,8 @@ set WYZER_TTS_ENABLED=true
 set WYZER_TTS_ENGINE=piper
 set WYZER_PIPER_EXE_PATH=.\wyzer\assets\piper\piper.exe
 set WYZER_PIPER_MODEL_PATH=.\wyzer\assets\piper\en_US-lessac-medium.onnx
+set WYZER_TTS_RATE=1.0
+set WYZER_SAPI_VOICE_NAME=
 set WYZER_SPEAK_HOTWORD_INTERRUPT=true
 set WYZER_SPEAK_START_COOLDOWN_SEC=1.8
 set WYZER_POST_SPEAK_DRAIN_SEC=0.35
@@ -263,6 +283,13 @@ set WYZER_POST_BARGEIN_WAIT_FOR_SPEECH_SEC=2.0
 set WYZER_FOLLOWUP_ENABLED=true
 set WYZER_FOLLOWUP_TIMEOUT_SEC=3.0
 set WYZER_FOLLOWUP_MAX_CHAIN=3
+
+# Optional web lookup tools (OFF by default)
+# These enable web_search/web_fetch for rare "look this up" requests.
+set WYZER_WEB_SEARCH_ENABLED=false
+set WYZER_WEB_SEARCH_MAX_RESULTS=5
+set WYZER_WEB_FETCH_MAX_CHARS=6000
+set WYZER_WEB_HTTP_TIMEOUT_SEC=8.0
 ```
 
 Or modify defaults in [wyzer/core/config.py](wyzer/core/config.py).

@@ -1,0 +1,19 @@
+{
+  "status": "ok",
+  "counts": {
+    "folders": 7,
+    "apps": 64,
+    "aliases": 1,
+    "tier2_apps": 66,
+    "games": 34,
+    "uwp_apps": 45
+  },
+  "latency_ms": 13218,
+  "games_sources": {
+    "steam": true,
+    "epic": true,
+    "shortcuts": true,
+    "folder_scan": true,
+    "xbox": true
+  }
+}

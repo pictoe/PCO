@@ -151,8 +151,8 @@ Examples:
     parser.add_argument(
         "--ollama-model",
         type=str,
-        default="llama3.1:latest",
-        help="Ollama model name (default: llama3.1:latest)"
+        default="llama3.2:3b",
+        help="Ollama model name (default: llama3.2:3b)"
     )
     
     parser.add_argument(
@@ -181,23 +181,50 @@ Examples:
     parser.add_argument(
         "--tts-engine",
         type=str,
-        default="piper",
-        choices=["piper"],
-        help="TTS engine to use (default: piper)"
+        default=Config.TTS_ENGINE,
+        choices=["piper", "sapi", "winrt"],
+        help="TTS engine to use (default: from Config). Use 'winrt'/'sapi' for Windows built-in voices"
+    )
+
+    parser.add_argument(
+        "--sapi-voice",
+        type=str,
+        default=Config.SAPI_VOICE_NAME,
+        help="Windows SAPI voice name (optional). Example: 'Microsoft David Desktop'. You can also pass 'male' or 'female'."
+    )
+
+    parser.add_argument(
+        "--winrt-voice",
+        type=str,
+        default=getattr(Config, "WINRT_VOICE_NAME", ""),
+        help="Windows WinRT voice DisplayName (optional). You can also pass 'male' or 'female'."
+    )
+
+    parser.add_argument(
+        "--list-tts-voices",
+        action="store_true",
+        help="List available Windows TTS voices (SAPI + WinRT) and exit"
     )
     
     parser.add_argument(
         "--piper-exe",
         type=str,
-        default="./wyzer/assets/piper/piper.exe",
-        help="Path to Piper executable (default: ./wyzer/assets/piper/piper.exe)"
+        default=Config.PIPER_EXE_PATH,
+        help=f"Path to Piper executable (default: {Config.PIPER_EXE_PATH})"
     )
     
     parser.add_argument(
         "--piper-model",
         type=str,
-        default="./wyzer/assets/piper/en_US-lessac-medium.onnx",
-        help="Path to Piper voice model (default: ./wyzer/assets/piper/en_US-lessac-medium.onnx)"
+        default=Config.PIPER_MODEL_PATH,
+        help=f"Path to Piper voice model (default: {Config.PIPER_MODEL_PATH})"
+    )
+
+    parser.add_argument(
+        "--tts-rate",
+        type=float,
+        default=Config.TTS_RATE,
+        help=f"Speech rate multiplier (default: {Config.TTS_RATE}). 1.0=normal, <1 slower, >1 faster"
     )
     
     parser.add_argument(
@@ -211,6 +238,32 @@ Examples:
         "--no-speak-interrupt",
         action="store_true",
         help="Disable barge-in (hotword interrupt during speaking)"
+    )
+
+    # Optional web browsing tools (Phase 6 - web_search/web_fetch)
+    # Off by default in Config for safety; this flag enables them for the current run.
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="Enable web_search/web_fetch tools (requires internet access)"
+    )
+    parser.add_argument(
+        "--web-max-results",
+        type=int,
+        default=None,
+        help="Max web_search results (default: Config.WEB_SEARCH_MAX_RESULTS)"
+    )
+    parser.add_argument(
+        "--web-fetch-max-chars",
+        type=int,
+        default=None,
+        help="Max chars returned by web_fetch (default: Config.WEB_FETCH_MAX_CHARS)"
+    )
+    parser.add_argument(
+        "--web-timeout",
+        type=float,
+        default=None,
+        help="HTTP timeout seconds for web_search/web_fetch (default: Config.WEB_HTTP_TIMEOUT_SEC)"
     )
     
     return parser.parse_args()
@@ -229,12 +282,36 @@ def main():
     init_logger(args.log_level)
     logger = get_logger()
 
+    # Apply web tool settings early so both single-process and multiprocess modes
+    # build the same tool registry and gating behavior.
+    if getattr(args, "web", False):
+        Config.WEB_SEARCH_ENABLED = True
+        os.environ["WYZER_WEB_SEARCH_ENABLED"] = "true"
+        if args.web_max_results is not None:
+            try:
+                Config.WEB_SEARCH_MAX_RESULTS = int(args.web_max_results)
+                os.environ["WYZER_WEB_SEARCH_MAX_RESULTS"] = str(int(args.web_max_results))
+            except Exception:
+                pass
+        if args.web_fetch_max_chars is not None:
+            try:
+                Config.WEB_FETCH_MAX_CHARS = int(args.web_fetch_max_chars)
+                os.environ["WYZER_WEB_FETCH_MAX_CHARS"] = str(int(args.web_fetch_max_chars))
+            except Exception:
+                pass
+        if args.web_timeout is not None:
+            try:
+                Config.WEB_HTTP_TIMEOUT_SEC = float(args.web_timeout)
+                os.environ["WYZER_WEB_HTTP_TIMEOUT_SEC"] = str(float(args.web_timeout))
+            except Exception:
+                pass
+
     # Apply profile tweaks (keep behavior identical by default)
     whisper_compute_type = "int8"
     if args.profile == "low_end":
         whisper_compute_type = "int8"
         # Optional: allow user to provide a smaller Ollama model via env
-        if args.ollama_model == "llama3.1:latest":
+        if args.ollama_model in ("llama3.2:3b", "llama3.1:latest"):
             low_end_model = os.environ.get("WYZER_OLLAMA_MODEL_LOW_END")
             if low_end_model:
                 args.ollama_model = low_end_model
@@ -242,6 +319,63 @@ def main():
     # List devices if requested
     if args.list_devices:
         MicStream.list_devices()
+        return 0
+
+    # List TTS voices if requested
+    if getattr(args, "list_tts_voices", False):
+        print("\nInstalled Windows SAPI voices:")
+        try:
+            from wyzer.tts.sapi_engine import list_sapi_voices
+
+            voices = list_sapi_voices()
+            if not voices:
+                print("  (none found)")
+            else:
+                for v in voices:
+                    name = v.get("name")
+                    gender = v.get("gender")
+                    culture = v.get("culture")
+                    age = v.get("age")
+                    parts = [str(name)]
+                    meta = []
+                    if gender:
+                        meta.append(str(gender))
+                    if culture:
+                        meta.append(str(culture))
+                    if age:
+                        meta.append(str(age))
+                    if meta:
+                        parts.append(f"({' / '.join(meta)})")
+                    print("  - " + " ".join(parts))
+        except Exception as e:
+            print(f"  (failed to enumerate voices: {e})")
+
+        print("\nInstalled Windows WinRT voices:")
+        try:
+            from wyzer.tts.winrt_engine import list_winrt_voices
+
+            voices = list_winrt_voices()
+            if not voices:
+                print("  (none found)")
+            else:
+                for v in voices:
+                    name = v.get("name")
+                    gender = v.get("gender")
+                    language = v.get("language")
+                    parts = [str(name)]
+                    meta = []
+                    if gender:
+                        meta.append(str(gender))
+                    if language:
+                        meta.append(str(language))
+                    if meta:
+                        parts.append(f"({' / '.join(meta)})")
+                    print("  - " + " ".join(parts))
+        except Exception as e:
+            print(f"  (failed to enumerate WinRT voices: {e})")
+
+        print("\nTip: run with --tts-engine winrt --winrt-voice male")
+        print("     or --tts-engine sapi --sapi-voice male")
         return 0
     
     # Parse audio device
@@ -282,8 +416,14 @@ def main():
     if args.tts == "on":
         print(f"  TTS Engine: {args.tts_engine}")
         print(f"  Piper Model: {args.piper_model}")
+        print(f"  TTS Rate: {args.tts_rate}")
+        if args.tts_engine == "winrt" and getattr(args, "winrt_voice", ""):
+            print(f"  WinRT Voice: {args.winrt_voice}")
+        if args.tts_engine == "sapi" and args.sapi_voice:
+            print(f"  SAPI Voice: {args.sapi_voice}")
         print(f"  Barge-in Enabled: {not args.no_speak_interrupt}")
     print(f"  Sample Rate: {Config.SAMPLE_RATE}Hz")
+    print(f"  Web Search Enabled: {bool(getattr(Config, 'WEB_SEARCH_ENABLED', False))}")
     print(f"  Log Level: {args.log_level}")
     print("=" * 60 + "\n")
     
@@ -297,6 +437,14 @@ def main():
     
     # Create and start assistant
     try:
+        # If user provided a CLI TTS rate, apply it for this run.
+        # (Config reads env at import-time, so this keeps behavior predictable for CLI usage.)
+        os.environ["WYZER_TTS_RATE"] = str(args.tts_rate)
+        if args.sapi_voice:
+            os.environ["WYZER_SAPI_VOICE_NAME"] = str(args.sapi_voice)
+        if getattr(args, "winrt_voice", ""):
+            os.environ["WYZER_WINRT_VOICE_NAME"] = str(args.winrt_voice)
+
         if args.single_process:
             assistant = WyzerAssistant(
                 enable_hotword=not args.no_hotword,
@@ -311,6 +459,8 @@ def main():
                 tts_engine=args.tts_engine,
                 piper_exe_path=args.piper_exe,
                 piper_model_path=args.piper_model,
+                sapi_voice_name=str(args.sapi_voice or ""),
+                winrt_voice_name=str(getattr(args, "winrt_voice", "") or ""),
                 tts_output_device=tts_output_device,
                 speak_hotword_interrupt=not args.no_speak_interrupt,
             )
@@ -329,6 +479,8 @@ def main():
                 tts_engine=args.tts_engine,
                 piper_exe_path=args.piper_exe,
                 piper_model_path=args.piper_model,
+                sapi_voice_name=str(args.sapi_voice or ""),
+                winrt_voice_name=str(getattr(args, "winrt_voice", "") or ""),
                 tts_output_device=tts_output_device,
                 speak_hotword_interrupt=not args.no_speak_interrupt,
                 log_level=args.log_level,
